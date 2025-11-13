@@ -16,6 +16,7 @@ const (
 type Bitcask struct {
 	Path          string
 	FileIDs       []uint32
+	Files         []*File
 	currentFileID uint32
 	CurrentFile   *File
 	memDB         *SkipListArr
@@ -55,19 +56,32 @@ func NewBitcask(path string) *Bitcask {
 	}
 	path = path + "/"
 	fileIDs, err := ScanDir(path)
-	memdb := NewSkipListArr()
 	if err != nil {
 		panic(err)
 	}
+	// open the file
+	if len(fileIDs) == 0 {
+		// create a new file
+		fileIDs = append(fileIDs, 1)
+	}
+	memdb := NewSkipListArr()
 	b := &Bitcask{
 		Path:    path,
 		FileIDs: fileIDs,
 		memDB:   memdb,
 	}
 	for _, fileID := range fileIDs {
-		file := NewFile(fileID, b.Path)
+		file := NewFile(fileID, path)
 		file.OpenFile()
-		defer file.CloseFile()
+		b.Files = append(b.Files, file)
+	}
+
+	if err != nil {
+		panic(err)
+	}
+
+	for _, file := range b.Files {
+
 		for {
 			entry, err := file.ReadEntry()
 			if err != nil {
@@ -91,20 +105,19 @@ func NewBitcask(path string) *Bitcask {
 }
 
 func (b *Bitcask) Open() error {
-	// open the file
-	if len(b.FileIDs) == 0 {
-		// create a new file
-		b.FileIDs = append(b.FileIDs, 1)
-	}
+	b.CurrentFile = b.Files[len(b.Files)-1]
 	b.currentFileID = b.FileIDs[len(b.FileIDs)-1]
-	file := NewFile(b.currentFileID, b.Path)
-	file.OpenFile()
-	b.CurrentFile = file
 	return nil
 }
 
 func (b *Bitcask) Close() error {
-	return b.CurrentFile.CloseFile()
+
+	for _, file := range b.Files {
+		if err := file.CloseFile(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *Bitcask) Put(key []byte, value []byte) error {
@@ -137,7 +150,7 @@ func (b *Bitcask) Put(key []byte, value []byte) error {
 	} else {
 		b.memDB.Insert(entry)
 	}
-
+	b.CurrentFile.Sync()
 	return nil
 }
 
@@ -146,11 +159,7 @@ func (b *Bitcask) Get(key []byte) (*Record, error) {
 	entry := b.memDB.Search(tmp)
 	if entry != nil {
 		// read the value from the file
-		f := NewFile(entry.FileID, b.Path)
-		if err := f.OpenFile(); err != nil {
-			return nil, err
-		}
-		defer f.CloseFile()
+		f := b.Files[entry.FileID-1]
 		value, err := f.Read(entry.ValuePos, entry.ValueSize)
 		if err != nil {
 			return nil, err
